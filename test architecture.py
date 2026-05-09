@@ -1,3 +1,4 @@
+#tests/test_architecture.py
 """
 架构验证测试（不需要真实 API Key）
 """
