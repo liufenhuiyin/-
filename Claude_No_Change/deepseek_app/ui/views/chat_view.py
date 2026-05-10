@@ -110,7 +110,7 @@ class ChatView(ft.Column):
                 ft.Segment(value="Flash", label=ft.Text("Flash", size=12)),
                 ft.Segment(value="Pro",   label=ft.Text("Pro ✦", size=12)),
             ],
-            selected={"Flash"},
+            selected=["Flash"],
             on_change=self._handle_model_change,
         )
 
@@ -254,7 +254,7 @@ class ChatView(ft.Column):
         self._page.update()
 
     def _on_model_config_changed(self) -> None:
-        self._model_selector.selected = {self._store.current_model}
+        self._model_selector.selected = [self._store.current_model]
         self._page.update()
 
     def destroy(self) -> None:
