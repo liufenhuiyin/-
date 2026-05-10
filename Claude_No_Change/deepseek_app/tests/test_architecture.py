@@ -1,0 +1,236 @@
+#tests/test_architecture.py
+"""
+架构验证测试（不需要真实 API Key）
+"""
+from __future__ import annotations
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import unittest
+from unittest.mock import MagicMock
+from control_state.models import (
+    ControlState, SessionState, ModelConfig,
+    ModelType, ThinkingType, ReasoningEffort, MessageVM,
+)
+from core.services.deepseek_client import DeepSeekClient, DeepSeekAPIError
+from core.services.conversation_service import ConversationService
+from ui.state.ui_state_store import UIStateStore
+from controllers.app_controller import AppController
+
+
+class TestControlState(unittest.TestCase):
+
+    def test_default_model_is_flash(self):
+        config = ModelConfig()
+        self.assertEqual(config.model, ModelType.FLASH)
+        self.assertEqual(config.thinking, ThinkingType.DISABLED)
+
+    def test_api_payload_structure(self):
+        config  = ModelConfig(model=ModelType.PRO, thinking=ThinkingType.ENABLED)
+        payload = config.to_api_payload()
+        self.assertIn("model",            payload)
+        self.assertIn("thinking",         payload)
+        self.assertIn("reasoning_effort", payload)
+        self.assertIsInstance(payload["thinking"], dict)
+        self.assertEqual(payload["thinking"]["type"], "enabled")
+
+    def test_pro_model_value(self):
+        config  = ModelConfig(model=ModelType.PRO)
+        payload = config.to_api_payload()
+        self.assertEqual(payload["model"], "deepseek-reasoner")
+
+    def test_flash_model_value(self):
+        config  = ModelConfig(model=ModelType.FLASH)
+        payload = config.to_api_payload()
+        self.assertEqual(payload["model"], "deepseek-chat")
+
+    def test_active_session_property(self):
+        state   = ControlState()
+        session = SessionState(session_id="s1")
+        state.sessions["s1"] = session
+        state.active_session_id = "s1"
+        self.assertEqual(state.active_session.session_id, "s1")
+
+    def test_no_active_session_returns_none(self):
+        state = ControlState()
+        self.assertIsNone(state.active_session)
+
+
+class TestConversationServiceStateless(unittest.TestCase):
+
+    def setUp(self):
+        self.mock_client = MagicMock(spec=DeepSeekClient)
+        self.mock_client.extract_content.return_value = "response"
+        self.mock_client.chat_completion.return_value = {
+            "choices": [{"message": {"content": "response"}}]
+        }
+        self.service = ConversationService(client=self.mock_client)
+
+    def test_service_only_has_client_attribute(self):
+        """Service 不应持有任何状态字段"""
+        attrs = [k for k in vars(self.service) if not k.startswith('__')]
+        self.assertEqual(attrs, ['_client'],
+                         f"Service 持有了不应存在的状态: {attrs}")
+
+    def test_messages_passed_unchanged_to_client(self):
+        original = [{"role": "user", "content": "hello"}]
+        self.service.send_message(
+            api_key="k", messages=original, model_config=ModelConfig().to_api_payload()
+        )
+        payload = self.mock_client.chat_completion.call_args.kwargs["payload"]
+        self.assertEqual(payload["messages"], original)
+
+    def test_model_config_used_in_payload(self):
+        config = ModelConfig(model=ModelType.PRO, thinking=ThinkingType.ENABLED)
+        self.service.send_message(
+            api_key="k", messages=[], model_config=config.to_api_payload()
+        )
+        payload = self.mock_client.chat_completion.call_args.kwargs["payload"]
+        self.assertEqual(payload["model"], "deepseek-reasoner")
+
+    def test_stream_is_false_in_mvp(self):
+        self.service.send_message(
+            api_key="k", messages=[], model_config=ModelConfig().to_api_payload()
+        )
+        payload = self.mock_client.chat_completion.call_args.kwargs["payload"]
+        self.assertFalse(payload["stream"])
+
+
+class TestUIStateStore(unittest.TestCase):
+
+    def setUp(self):
+        self.store = UIStateStore()
+
+    def test_subscribe_callback_fires(self):
+        fired = []
+        self.store.subscribe("messages", lambda: fired.append(1))
+        msg = MessageVM(message_id="1", role="user", content="hi", model_label="Flash")
+        self.store.append_message(msg)
+        self.assertEqual(len(fired), 1)
+
+    def test_unsubscribe_stops_callback(self):
+        fired = []
+        cb = lambda: fired.append(1)
+        self.store.subscribe("messages", cb)
+        self.store.unsubscribe("messages", cb)
+        msg = MessageVM(message_id="1", role="user", content="hi", model_label="Flash")
+        self.store.append_message(msg)
+        self.assertEqual(len(fired), 0)
+
+    def test_set_error_disables_loading(self):
+        self.store.set_loading(True)
+        self.store.set_error("oops")
+        self.assertFalse(self.store.is_loading)
+        self.assertEqual(self.store.error, "oops")
+
+    def test_clear_error(self):
+        self.store.set_error("err")
+        self.store.clear_error()
+        self.assertIsNone(self.store.error)
+
+    def test_messages_append(self):
+        m1 = MessageVM(message_id="1", role="user",      content="a", model_label="Flash")
+        m2 = MessageVM(message_id="2", role="assistant", content="b", model_label="Flash")
+        self.store.append_message(m1)
+        self.store.append_message(m2)
+        self.assertEqual(len(self.store.messages), 2)
+
+
+class TestAppControllerFlow(unittest.TestCase):
+
+    def _make(self, response="mock answer"):
+        mc = MagicMock(spec=DeepSeekClient)
+        mc.chat_completion.return_value = {"choices": [{"message": {"content": response}}]}
+        mc.extract_content.return_value = response
+        svc   = ConversationService(client=mc)
+        store = UIStateStore()
+        ctrl  = AppController(store=store, conv_service=svc, api_key="fake")
+        return ctrl, store, mc
+
+    def test_send_message_produces_two_messages(self):
+        import time
+        ctrl, store, _ = self._make("hello!")
+        ctrl.send_message("hi")
+        time.sleep(0.5)
+        self.assertEqual(len(store.messages), 2)
+        self.assertEqual(store.messages[0].role, "user")
+        self.assertEqual(store.messages[1].role, "assistant")
+        self.assertEqual(store.messages[1].content, "hello!")
+
+    def test_switch_to_pro_updates_store_and_state(self):
+        ctrl, store, _ = self._make()
+        ctrl.switch_model("Pro")
+        self.assertEqual(store.current_model, "Pro")
+        self.assertTrue(store.thinking_on)
+        # ControlState 也更新了
+        session = ctrl._state.active_session
+        self.assertEqual(session.model_config.model, ModelType.PRO)
+
+    def test_pro_model_reaches_api(self):
+        import time
+        ctrl, store, mc = self._make()
+        ctrl.switch_model("Pro")
+        ctrl.send_message("test")
+        time.sleep(0.5)
+        payload = mc.chat_completion.call_args.kwargs["payload"]
+        self.assertEqual(payload["model"], "deepseek-reasoner")
+
+    def test_api_error_sets_store_error(self):
+        import time
+        mc = MagicMock(spec=DeepSeekClient)
+        mc.chat_completion.side_effect = DeepSeekAPIError(401, "Unauthorized")
+        svc   = ConversationService(client=mc)
+        store = UIStateStore()
+        ctrl  = AppController(store=store, conv_service=svc, api_key="bad")
+        ctrl.send_message("hi")
+        time.sleep(0.5)
+        self.assertIsNotNone(store.error)
+        self.assertIn("401", store.error)
+
+    def test_new_conversation_clears_messages(self):
+        import time
+        ctrl, store, _ = self._make()
+        ctrl.send_message("hello")
+        time.sleep(0.5)
+        self.assertGreater(len(store.messages), 0)
+        ctrl.new_conversation()
+        self.assertEqual(len(store.messages), 0)
+
+    def test_empty_message_not_sent(self):
+        ctrl, store, mc = self._make()
+        ctrl.send_message("   ")   # 只有空格
+        import time; time.sleep(0.2)
+        mc.chat_completion.assert_not_called()
+
+
+class TestLayerBoundaries(unittest.TestCase):
+
+    def test_deepseek_client_does_not_store_api_key(self):
+        client = DeepSeekClient()
+        self.assertNotIn("api_key", vars(client))
+        self.assertNotIn("_api_key", vars(client))
+
+    def test_conversation_service_has_no_db_code(self):
+        import pathlib
+        path   = pathlib.Path(__file__).parent.parent / "core" / "services" / "conversation_service.py"
+        source = path.read_text()
+        for forbidden in ["sqlite3", "Repository", ".db", "database"]:
+            self.assertNotIn(forbidden, source,
+                             f"conversation_service.py 不应包含 '{forbidden}'")
+
+    def test_ui_views_do_not_import_core_services(self):
+        import pathlib
+        ui_dir  = pathlib.Path(__file__).parent.parent / "ui"
+        bad     = ["deepseek_client", "conversation_service", "from core"]
+        violations = []
+        for f in ui_dir.rglob("*.py"):
+            src = f.read_text()
+            for b in bad:
+                if b in src:
+                    violations.append(f"{f.name}: '{b}'")
+        self.assertEqual(violations, [],
+                         "UI 层不允许直接引用 Core:\n" + "\n".join(violations))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
