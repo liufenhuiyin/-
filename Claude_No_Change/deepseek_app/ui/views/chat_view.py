@@ -1,6 +1,8 @@
 # ui/views/chat_view.py
 """
 ChatView — 兼容 Flet 0.85+
+完全避免 ft.border.only() / ft.padding.symmetric() 等模块级方法调用。
+全部改用类实例化形式。
 """
 from __future__ import annotations
 
@@ -10,24 +12,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from controllers.app_controller import AppController
     from ui.state.ui_state_store import UIStateStore
-
-
-def _pad(left=0, right=0, top=0, bottom=0, horizontal=0, vertical=0):
-    return ft.Padding(
-        left=left or horizontal,
-        right=right or horizontal,
-        top=top or vertical,
-        bottom=bottom or vertical,
-    )
-
-
-def _margin(left=0, right=0, top=0, bottom=0, horizontal=0, vertical=0):
-    return ft.Margin(
-        left=left or horizontal,
-        right=right or horizontal,
-        top=top or vertical,
-        bottom=bottom or vertical,
-    )
 
 
 class MessageBubble(ft.Container):
@@ -54,10 +38,11 @@ class MessageBubble(ft.Container):
                 spacing=4,
                 tight=True,
             ),
-            padding=_pad(horizontal=16, vertical=12),
-            margin=_margin(
+            padding=ft.Padding(left=16, right=16, top=12, bottom=12),
+            margin=ft.Margin(
                 left=48 if is_user else 0,
                 right=0 if is_user else 48,
+                top=0,
                 bottom=4,
             ),
             bgcolor=ft.Colors.with_opacity(
@@ -84,7 +69,7 @@ class ChatView(ft.Column):
         self._message_list = ft.ListView(
             expand=True,
             spacing=8,
-            padding=_pad(horizontal=16, vertical=12),
+            padding=ft.Padding(left=16, right=16, top=12, bottom=12),
             auto_scroll=True,
         )
 
@@ -98,9 +83,7 @@ class ChatView(ft.Column):
             min_lines=1,
             shift_enter=True,
             on_submit=self._handle_submit,
-            border_color=ft.Colors.with_opacity(0.15, ft.Colors.ON_SURFACE),
-            focused_border_color=ft.Colors.PRIMARY,
-            content_padding=_pad(horizontal=16, vertical=12),
+            content_padding=ft.Padding(left=16, right=16, top=12, bottom=12),
         )
 
         # ── 发送按钮 ──────────────────────────────
@@ -131,7 +114,7 @@ class ChatView(ft.Column):
             on_change=self._handle_model_change,
         )
 
-        # ── 新对话按钮（用 ElevatedButton 更兼容）──
+        # ── 新对话按钮 ────────────────────────────
         self._new_chat_btn = ft.ElevatedButton(
             content=ft.Row(
                 controls=[
@@ -142,13 +125,6 @@ class ChatView(ft.Column):
                 tight=True,
             ),
             on_click=lambda _: self._controller.new_conversation(),
-            style=ft.ButtonStyle(
-                bgcolor=ft.Colors.with_opacity(0.05, ft.Colors.ON_SURFACE),
-                color=ft.Colors.ON_SURFACE,
-                elevation=0,
-                overlay_color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE),
-                shape=ft.RoundedRectangleBorder(radius=8),
-            ),
         )
 
         # ── 错误提示 ──────────────────────────────
@@ -160,10 +136,13 @@ class ChatView(ft.Column):
         )
         self._error_banner = ft.Container(
             visible=False,
-            padding=_pad(horizontal=16, vertical=8),
+            padding=ft.Padding(left=16, right=16, top=8, bottom=8),
             bgcolor=ft.Colors.ERROR_CONTAINER,
-            border_radius=8,
-            margin=_margin(horizontal=16, vertical=4),
+            border_radius=ft.BorderRadius(
+                top_left=8, top_right=8,
+                bottom_left=8, bottom_right=8,
+            ),
+            margin=ft.Margin(left=16, right=16, top=4, bottom=4),
             content=ft.Row(
                 controls=[
                     ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR, size=16),
@@ -178,7 +157,7 @@ class ChatView(ft.Column):
             ),
         )
 
-        # ── 布局 ──────────────────────────────────
+        # ── 顶部工具栏 ────────────────────────────
         toolbar = ft.Row(
             controls=[
                 ft.Text("DeepSeek", size=15, weight=ft.FontWeight.W_600),
@@ -189,6 +168,7 @@ class ChatView(ft.Column):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
+        # ── 底部输入区 ────────────────────────────
         input_row = ft.Row(
             controls=[
                 self._input_field,
@@ -202,38 +182,36 @@ class ChatView(ft.Column):
             spacing=8,
         )
 
+        # ── 用 Container + border 属性替代 ft.border.only() ──
+        # ft.Border() 直接传各边的 BorderSide
+        divider_color = ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)
+
         self.controls = [
             ft.Container(
                 content=toolbar,
-                padding=_pad(horizontal=16, vertical=10),
-                border=ft.border.only(
-                    bottom=ft.BorderSide(
-                        1,
-                        ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE),
-                    )
+                padding=ft.Padding(left=16, right=16, top=10, bottom=10),
+                border=ft.Border(
+                    bottom=ft.BorderSide(1, divider_color),
                 ),
             ),
             self._message_list,
             self._error_banner,
             ft.Container(
                 content=input_row,
-                padding=_pad(horizontal=16, vertical=12),
-                border=ft.border.only(
-                    top=ft.BorderSide(
-                        1,
-                        ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE),
-                    )
+                padding=ft.Padding(left=16, right=16, top=12, bottom=12),
+                border=ft.Border(
+                    top=ft.BorderSide(1, divider_color),
                 ),
             ),
         ]
 
-        # ── 订阅 UIStateStore ──────────────────────
+        # ── 订阅 Store ────────────────────────────
         self._store.subscribe("messages",     self._on_messages_changed)
         self._store.subscribe("loading",      self._on_loading_changed)
         self._store.subscribe("error",        self._on_error_changed)
         self._store.subscribe("model_config", self._on_model_config_changed)
 
-    # ── UI 事件（只做校验 + 委托）─────────────────
+    # ── UI 事件 ───────────────────────────────────
 
     def _handle_submit(self, e) -> None:
         text = self._input_field.value or ""
@@ -250,7 +228,7 @@ class ChatView(ft.Column):
     def _dismiss_error(self) -> None:
         self._store.clear_error()
 
-    # ── Store 订阅回调（只读 store + 渲染）────────
+    # ── Store 订阅回调 ────────────────────────────
 
     def _on_messages_changed(self) -> None:
         self._message_list.controls = [
