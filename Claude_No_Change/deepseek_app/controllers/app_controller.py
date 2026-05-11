@@ -1,17 +1,6 @@
 # controllers/app_controller.py
 """
-AppController — MVP 最简版本。
-
-职责：
-  - 对 UI 暴露所有可调用的公开方法
-  - 编排子 Controller + Service 的调用顺序
-  - 持有并更新 UIStateStore
-  - 管理 ControlState（运行时配置唯一来源）
-
-禁止：
-  - 包含任何业务计算逻辑
-  - 持有任何 Flet 组件引用
-  - 直接调用 Core Service（MVP 阶段因为没有子 Controller，暂时直接调用 service）
+AppController — 支持流式输出版本。
 """
 from __future__ import annotations
 
@@ -30,86 +19,45 @@ from ui.state.ui_state_store import UIStateStore
 
 
 class AppController:
-    """
-    MVP 版 AppController。
-
-    MVP 简化说明：
-      - 没有 ConversationController / SettingsController 子 Controller
-      - 直接持有 ConversationService（完整版本会通过子 Controller 调用）
-      - api_key 从构造函数传入（完整版本会在 SettingsController 管理）
-      - messages 存在 ControlState 中（完整版本会有 Repository 持久化）
-    """
 
     def __init__(
         self,
-        store:       UIStateStore,
+        store:        UIStateStore,
         conv_service: ConversationService,
-        api_key:     str,
+        api_key:      str,
     ):
-        self._store       = store
-        self._conv        = conv_service
-        self._api_key     = api_key
-        self._state       = ControlState()
-        self._lock        = threading.Lock()
-
-        # 初始化默认会话
+        self._store  = store
+        self._conv   = conv_service
+        self._api_key = api_key
+        self._state  = ControlState()
+        self._lock   = threading.Lock()
         self._init_default_session()
-
-    # ──────────────────────────────────────────────
-    # 初始化
-    # ──────────────────────────────────────────────
 
     def _init_default_session(self) -> None:
         session_id = f"sess_{uuid.uuid4().hex[:8]}"
         session    = SessionState(session_id=session_id)
+        self._state.sessions[session_id] = session
+        self._state.messages[session_id] = []
+        self._state.active_session_id    = session_id
+        self._store.set_model_config(model="Flash", thinking=False)
 
-        self._state.sessions[session_id]  = session
-        self._state.messages[session_id]  = []
-        self._state.active_session_id     = session_id
-
-        # 同步初始 UI 状态
-        self._store.set_model_config(
-            model    = "Flash",
-            thinking = False,
-        )
-
-    # ──────────────────────────────────────────────
-    # 公开动作接口（UI 调用的全部入口）
-    # ──────────────────────────────────────────────
+    # ── 公开动作接口 ──────────────────────────────
 
     def send_message(self, text: str) -> None:
-        """
-        发送用户消息。在后台线程执行，不阻塞 UI。
-
-        调用链：
-          UI → AppController.send_message()
-            → ControlState 读取 model_config
-            → ConversationService.send_message()
-              → DeepSeekClient.chat_completion()
-            → ControlState 更新 messages
-            → UIStateStore 通知 UI
-        """
         text = text.strip()
         if not text:
             return
-
-        # 在后台线程执行，避免阻塞 Flet UI 线程
         thread = threading.Thread(
-            target=self._send_message_worker,
+            target=self._send_worker,
             args=(text,),
             daemon=True,
         )
         thread.start()
 
     def switch_model(self, model_name: str) -> None:
-        """
-        切换模型（Flash / Pro）。
-        纯状态变更，不触发 API 调用。
-        """
         session = self._state.active_session
         if not session:
             return
-
         with self._lock:
             if model_name == "Pro":
                 session.model_config = ModelConfig(
@@ -121,27 +69,20 @@ class AppController:
                     model    = ModelType.FLASH,
                     thinking = ThinkingType.DISABLED,
                 )
-
         self._store.set_model_config(
             model    = model_name,
             thinking = session.model_config.thinking == ThinkingType.ENABLED,
         )
 
     def new_conversation(self) -> None:
-        """新建会话，清空消息列表"""
         session_id = f"sess_{uuid.uuid4().hex[:8]}"
         session    = SessionState(session_id=session_id)
-
         with self._lock:
             self._state.sessions[session_id] = session
             self._state.messages[session_id] = []
             self._state.active_session_id    = session_id
-
         self._store.set_messages([])
-        self._store.set_model_config(
-            model    = "Flash",
-            thinking = False,
-        )
+        self._store.set_model_config(model="Flash", thinking=False)
         self._store.clear_error()
 
     def get_current_model(self) -> str:
@@ -150,22 +91,15 @@ class AppController:
             return "Flash"
         return "Pro" if session.model_config.model == ModelType.PRO else "Flash"
 
-    # ──────────────────────────────────────────────
-    # 内部工作方法（不暴露给 UI）
-    # ──────────────────────────────────────────────
+    # ── 内部流式发送 ──────────────────────────────
 
-    def _send_message_worker(self, text: str) -> None:
-        """
-        后台线程执行的发送逻辑。
-        所有状态读写通过 ControlState，所有 UI 更新通过 UIStateStore。
-        """
+    def _send_worker(self, text: str) -> None:
         session_id = self._state.active_session_id
         session    = self._state.active_session
-
         if not session or not session_id:
             return
 
-        # ── Step 1：立刻把用户消息写入状态并推送 UI ──
+        # 1. 用户消息立刻显示
         user_msg = MessageVM(
             message_id  = f"user_{uuid.uuid4().hex[:8]}",
             role        = "user",
@@ -174,46 +108,73 @@ class AppController:
         )
         with self._lock:
             self._state.messages[session_id].append(user_msg)
-
         self._store.append_message(user_msg)
+
+        # 2. 占位 assistant 消息（内容为空，流式填入）
+        asst_id  = f"asst_{uuid.uuid4().hex[:8]}"
+        asst_msg = MessageVM(
+            message_id  = asst_id,
+            role        = "assistant",
+            content     = "",
+            model_label = self._store.current_model,
+            is_streaming = True,
+        )
+        with self._lock:
+            self._state.messages[session_id].append(asst_msg)
+        self._store.append_message(asst_msg)
         self._store.set_loading(True)
         self._store.clear_error()
 
         try:
-            # ── Step 2：从 ControlState 读取配置（唯一来源）──
+            # 3. 从 ControlState 读取配置（唯一来源）
             model_config = session.model_config.to_api_payload()
 
-            # ── Step 3：构建 messages（MVP：全量历史，不裁剪）──
+            # 4. 构建消息历史（去掉最后那条空的占位 assistant 消息）
             with self._lock:
                 history = list(self._state.messages[session_id])
-
             api_messages = [
-                {"role": msg.role, "content": msg.content}
-                for msg in history
+                {"role": m.role, "content": m.content}
+                for m in history
+                if not (m.message_id == asst_id and m.content == "")
             ]
 
-            # ── Step 4：调用 Service（不含任何业务判断）──
-            response_text = self._conv.send_message(
+            # 5. 流式调用，每个 token 通过回调推送
+            final_content = self._conv.send_message_stream(
                 api_key      = self._api_key,
                 messages     = api_messages,
                 model_config = model_config,
+                on_token     = self._on_token,
             )
 
-            # ── Step 5：把 assistant 回复写入状态并推送 UI ──
-            assistant_msg = MessageVM(
-                message_id  = f"asst_{uuid.uuid4().hex[:8]}",
-                role        = "assistant",
-                content     = response_text,
-                model_label = self._store.current_model,
-            )
+            # 6. 更新 ControlState 中的完整内容
             with self._lock:
-                self._state.messages[session_id].append(assistant_msg)
+                for m in self._state.messages[session_id]:
+                    if m.message_id == asst_id:
+                        m.content     = final_content
+                        m.is_streaming = False
+                        break
 
-            self._store.append_message(assistant_msg)
-            self._store.set_loading(False)
+            self._store.set_stream_complete(asst_id, final_content)
 
         except DeepSeekAPIError as e:
+            # 移除空占位消息
+            with self._lock:
+                self._state.messages[session_id] = [
+                    m for m in self._state.messages[session_id]
+                    if m.message_id != asst_id
+                ]
+            self._store.remove_message(asst_id)
             self._store.set_error(f"API 错误 {e.status_code}：{e.message}")
 
         except Exception as e:
+            with self._lock:
+                self._state.messages[session_id] = [
+                    m for m in self._state.messages[session_id]
+                    if m.message_id != asst_id
+                ]
+            self._store.remove_message(asst_id)
             self._store.set_error(f"未知错误：{str(e)}")
+
+    def _on_token(self, token: str) -> None:
+        """每收到一个 token，写入 store，store 通知 UI 渲染"""
+        self._store.append_stream_token(token)
