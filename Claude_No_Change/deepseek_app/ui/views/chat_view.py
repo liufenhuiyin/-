@@ -1,8 +1,6 @@
 # ui/views/chat_view.py
 """
-ChatView — 兼容 Flet 0.85+
-完全避免 ft.border.only() / ft.padding.symmetric() 等模块级方法调用。
-全部改用类实例化形式。
+ChatView — 兼容 Flet 0.85+，支持流式 token 实时渲染。
 """
 from __future__ import annotations
 
@@ -19,6 +17,12 @@ class MessageBubble(ft.Container):
     def __init__(self, message):
         is_user = message.role == "user"
 
+        self._md = ft.Markdown(
+            value=message.content if message.content else "▋",
+            selectable=True,
+            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+        )
+
         role_label = ft.Text(
             "You" if is_user else message.model_label,
             size=11,
@@ -26,15 +30,9 @@ class MessageBubble(ft.Container):
             color=ft.Colors.with_opacity(0.5, ft.Colors.ON_SURFACE),
         )
 
-        content = ft.Markdown(
-            value=message.content,
-            selectable=True,
-            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-        )
-
         super().__init__(
             content=ft.Column(
-                controls=[role_label, content],
+                controls=[role_label, self._md],
                 spacing=4,
                 tight=True,
             ),
@@ -55,6 +53,10 @@ class MessageBubble(ft.Container):
             ),
         )
 
+    def update_content(self, new_text: str) -> None:
+        self._md.value = new_text if new_text else "▋"
+        self._md.update()
+
 
 class ChatView(ft.Column):
 
@@ -65,7 +67,6 @@ class ChatView(ft.Column):
         self._store      = store
         self._controller = controller
 
-        # ── 消息列表 ──────────────────────────────
         self._message_list = ft.ListView(
             expand=True,
             spacing=8,
@@ -73,7 +74,6 @@ class ChatView(ft.Column):
             auto_scroll=True,
         )
 
-        # ── 输入框 ────────────────────────────────
         self._input_field = ft.TextField(
             hint_text="发送消息...（Enter 发送，Shift+Enter 换行）",
             border_radius=12,
@@ -86,7 +86,6 @@ class ChatView(ft.Column):
             content_padding=ft.Padding(left=16, right=16, top=12, bottom=12),
         )
 
-        # ── 发送按钮 ──────────────────────────────
         self._send_btn = ft.IconButton(
             icon=ft.Icons.ARROW_UPWARD_ROUNDED,
             icon_size=20,
@@ -95,16 +94,11 @@ class ChatView(ft.Column):
             on_click=self._handle_submit,
         )
 
-        # ── 加载指示器 ────────────────────────────
         self._loading_ring = ft.ProgressRing(
-            width=20,
-            height=20,
-            stroke_width=2,
-            visible=False,
-            color=ft.Colors.PRIMARY,
+            width=20, height=20, stroke_width=2,
+            visible=False, color=ft.Colors.PRIMARY,
         )
 
-        # ── 模型切换 ──────────────────────────────
         self._model_selector = ft.SegmentedButton(
             segments=[
                 ft.Segment(value="Flash", label=ft.Text("Flash", size=12)),
@@ -114,33 +108,26 @@ class ChatView(ft.Column):
             on_change=self._handle_model_change,
         )
 
-        # ── 新对话按钮 ────────────────────────────
         self._new_chat_btn = ft.ElevatedButton(
             content=ft.Row(
                 controls=[
                     ft.Icon(ft.Icons.ADD_ROUNDED, size=16),
                     ft.Text("新对话", size=13),
                 ],
-                spacing=4,
-                tight=True,
+                spacing=4, tight=True,
             ),
             on_click=lambda _: self._controller.new_conversation(),
         )
 
-        # ── 错误提示 ──────────────────────────────
         self._error_text = ft.Text(
-            "",
-            color=ft.Colors.ON_ERROR_CONTAINER,
-            size=13,
-            expand=True,
+            "", color=ft.Colors.ON_ERROR_CONTAINER, size=13, expand=True,
         )
         self._error_banner = ft.Container(
             visible=False,
             padding=ft.Padding(left=16, right=16, top=8, bottom=8),
             bgcolor=ft.Colors.ERROR_CONTAINER,
             border_radius=ft.BorderRadius(
-                top_left=8, top_right=8,
-                bottom_left=8, bottom_right=8,
+                top_left=8, top_right=8, bottom_left=8, bottom_right=8,
             ),
             margin=ft.Margin(left=16, right=16, top=4, bottom=4),
             content=ft.Row(
@@ -148,8 +135,7 @@ class ChatView(ft.Column):
                     ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR, size=16),
                     self._error_text,
                     ft.IconButton(
-                        icon=ft.Icons.CLOSE,
-                        icon_size=16,
+                        icon=ft.Icons.CLOSE, icon_size=16,
                         on_click=lambda _: self._dismiss_error(),
                     ),
                 ],
@@ -157,56 +143,45 @@ class ChatView(ft.Column):
             ),
         )
 
-        # ── 顶部工具栏 ────────────────────────────
-        toolbar = ft.Row(
-            controls=[
-                ft.Text("DeepSeek", size=15, weight=ft.FontWeight.W_600),
-                ft.Container(expand=True),
-                self._model_selector,
-                self._new_chat_btn,
-            ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
-        # ── 底部输入区 ────────────────────────────
-        input_row = ft.Row(
-            controls=[
-                self._input_field,
-                ft.Column(
-                    controls=[self._loading_ring, self._send_btn],
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    spacing=4,
-                ),
-            ],
-            vertical_alignment=ft.CrossAxisAlignment.END,
-            spacing=8,
-        )
-
-        # ── 用 Container + border 属性替代 ft.border.only() ──
-        # ft.Border() 直接传各边的 BorderSide
-        divider_color = ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)
+        divider = ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)
 
         self.controls = [
             ft.Container(
-                content=toolbar,
-                padding=ft.Padding(left=16, right=16, top=10, bottom=10),
-                border=ft.Border(
-                    bottom=ft.BorderSide(1, divider_color),
+                content=ft.Row(
+                    controls=[
+                        ft.Text("DeepSeek", size=15, weight=ft.FontWeight.W_600),
+                        ft.Container(expand=True),
+                        self._model_selector,
+                        self._new_chat_btn,
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
+                padding=ft.Padding(left=16, right=16, top=10, bottom=10),
+                border=ft.Border(bottom=ft.BorderSide(1, divider)),
             ),
             self._message_list,
             self._error_banner,
             ft.Container(
-                content=input_row,
-                padding=ft.Padding(left=16, right=16, top=12, bottom=12),
-                border=ft.Border(
-                    top=ft.BorderSide(1, divider_color),
+                content=ft.Row(
+                    controls=[
+                        self._input_field,
+                        ft.Column(
+                            controls=[self._loading_ring, self._send_btn],
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=4,
+                        ),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.END,
+                    spacing=8,
                 ),
+                padding=ft.Padding(left=16, right=16, top=12, bottom=12),
+                border=ft.Border(top=ft.BorderSide(1, divider)),
             ),
         ]
 
-        # ── 订阅 Store ────────────────────────────
+        # 订阅 store 事件
         self._store.subscribe("messages",     self._on_messages_changed)
+        self._store.subscribe("stream",       self._on_stream_updated)   # 新增
         self._store.subscribe("loading",      self._on_loading_changed)
         self._store.subscribe("error",        self._on_error_changed)
         self._store.subscribe("model_config", self._on_model_config_changed)
@@ -231,9 +206,23 @@ class ChatView(ft.Column):
     # ── Store 订阅回调 ────────────────────────────
 
     def _on_messages_changed(self) -> None:
+        """消息列表变化时重建气泡列表（新增/删除消息时触发）"""
         self._message_list.controls = [
             MessageBubble(msg) for msg in self._store.messages
         ]
+        self._page.update()
+
+    def _on_stream_updated(self) -> None:
+        """
+        流式 token 到达时只更新最后一个气泡，不重建列表。
+        O(1) 操作，保证流式输出流畅。
+        """
+        if not self._message_list.controls:
+            return
+        last_bubble = self._message_list.controls[-1]
+        streaming_msg = self._store.messages[-1] if self._store.messages else None
+        if streaming_msg and isinstance(last_bubble, MessageBubble):
+            last_bubble.update_content(streaming_msg.content)
         self._page.update()
 
     def _on_loading_changed(self) -> None:
@@ -259,6 +248,7 @@ class ChatView(ft.Column):
 
     def destroy(self) -> None:
         self._store.unsubscribe("messages",     self._on_messages_changed)
+        self._store.unsubscribe("stream",       self._on_stream_updated)
         self._store.unsubscribe("loading",      self._on_loading_changed)
         self._store.unsubscribe("error",        self._on_error_changed)
         self._store.unsubscribe("model_config", self._on_model_config_changed)
