@@ -33,10 +33,7 @@ class StreamStatus(str, Enum):
 class ModelConfig:
     """
     API payload 的唯一来源。Service 不得修改任何字段。
-
-    DeepSeek API 规定：
-      - Flash (deepseek-chat)   : 不能携带 thinking / reasoning_effort
-      - Pro   (deepseek-reasoner): 必须携带 thinking / reasoning_effort
+    Flash 模式只传 model 字段，Pro 模式才传 thinking / reasoning_effort。
     """
     model:            ModelType       = ModelType.FLASH
     thinking:         ThinkingType    = ThinkingType.DISABLED
@@ -50,7 +47,7 @@ class ModelConfig:
                 "reasoning_effort": self.reasoning_effort.value,
             }
         else:
-            # Flash 模式只传 model，不传 thinking / reasoning_effort
+            # Flash 不能携带 thinking / reasoning_effort，否则 API 报 400
             return {
                 "model": self.model.value,
             }
@@ -58,12 +55,13 @@ class ModelConfig:
 
 @dataclass
 class MessageVM:
-    message_id:  str
-    role:        str
-    content:     str
-    model_label: str
-    created_at:  datetime = field(default_factory=datetime.now)
-    is_error:    bool = False
+    message_id:   str
+    role:         str
+    content:      str
+    model_label:  str
+    created_at:   datetime = field(default_factory=datetime.now)
+    is_error:     bool = False
+    is_streaming: bool = False   # 流式输出时为 True，完成后置为 False
 
 
 @dataclass
