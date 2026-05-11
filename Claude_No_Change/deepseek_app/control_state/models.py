@@ -1,14 +1,10 @@
 # control_state/models.py
-"""
-Control State — MVP 最小版本（使用标准库，无第三方依赖）
-"""
 from __future__ import annotations
 
 from enum import Enum
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
 from datetime import datetime
-import json
 
 
 class ModelType(str, Enum):
@@ -27,30 +23,41 @@ class ReasoningEffort(str, Enum):
 
 
 class StreamStatus(str, Enum):
-    IDLE    = "idle"
-    LOADING = "loading"
+    IDLE     = "idle"
+    LOADING  = "loading"
     COMPLETE = "complete"
-    ERROR   = "error"
+    ERROR    = "error"
 
 
 @dataclass
 class ModelConfig:
-    """API payload 的唯一来源。Service 不得修改任何字段。"""
+    """
+    API payload 的唯一来源。Service 不得修改任何字段。
+
+    DeepSeek API 规定：
+      - Flash (deepseek-chat)   : 不能携带 thinking / reasoning_effort
+      - Pro   (deepseek-reasoner): 必须携带 thinking / reasoning_effort
+    """
     model:            ModelType       = ModelType.FLASH
     thinking:         ThinkingType    = ThinkingType.DISABLED
     reasoning_effort: ReasoningEffort = ReasoningEffort.HIGH
 
     def to_api_payload(self) -> Dict[str, Any]:
-        return {
-            "model":            self.model.value,
-            "thinking":         {"type": self.thinking.value},
-            "reasoning_effort": self.reasoning_effort.value,
-        }
+        if self.model == ModelType.PRO:
+            return {
+                "model":            self.model.value,
+                "thinking":         {"type": self.thinking.value},
+                "reasoning_effort": self.reasoning_effort.value,
+            }
+        else:
+            # Flash 模式只传 model，不传 thinking / reasoning_effort
+            return {
+                "model": self.model.value,
+            }
 
 
 @dataclass
 class MessageVM:
-    """UI 层使用的消息视图对象"""
     message_id:  str
     role:        str
     content:     str
@@ -61,7 +68,6 @@ class MessageVM:
 
 @dataclass
 class SessionState:
-    """单个会话的完整运行时状态"""
     session_id:    str
     created_at:    datetime      = field(default_factory=datetime.now)
     model_config:  ModelConfig   = field(default_factory=ModelConfig)
@@ -71,10 +77,9 @@ class SessionState:
 
 @dataclass
 class ControlState:
-    """AppController 持有的完整状态聚合。唯一合法配置来源。"""
-    active_session_id: Optional[str]               = None
-    sessions:          Dict[str, SessionState]      = field(default_factory=dict)
-    messages:          Dict[str, List[MessageVM]]   = field(default_factory=dict)
+    active_session_id: Optional[str]             = None
+    sessions:          Dict[str, SessionState]    = field(default_factory=dict)
+    messages:          Dict[str, List[MessageVM]] = field(default_factory=dict)
 
     @property
     def active_session(self) -> Optional[SessionState]:
