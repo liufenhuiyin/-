@@ -1,4 +1,4 @@
-#tests/test_architecture.py
+# tests/test_architecture.py
 """
 架构验证测试（不需要真实 API Key）
 """
@@ -213,7 +213,7 @@ class TestLayerBoundaries(unittest.TestCase):
     def test_conversation_service_has_no_db_code(self):
         import pathlib
         path   = pathlib.Path(__file__).parent.parent / "core" / "services" / "conversation_service.py"
-        source = path.read_text()
+        source = path.read_text(encoding="utf-8")
         for forbidden in ["sqlite3", "Repository", ".db", "database"]:
             self.assertNotIn(forbidden, source,
                              f"conversation_service.py 不应包含 '{forbidden}'")
@@ -224,7 +224,7 @@ class TestLayerBoundaries(unittest.TestCase):
         bad     = ["deepseek_client", "conversation_service", "from core"]
         violations = []
         for f in ui_dir.rglob("*.py"):
-            src = f.read_text()
+            src = f.read_text(encoding="utf-8")
             for b in bad:
                 if b in src:
                     violations.append(f"{f.name}: '{b}'")
