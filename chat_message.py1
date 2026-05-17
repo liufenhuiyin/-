@@ -1,0 +1,264 @@
+# Layer: UI → widgets
+# File: app/ui/widgets/chat_message.py
+# Responsibility: 渲染单条消息气泡（用户 / 助手 / 思考块），支持流式逐字更新
+# Input:  MessageVM（来自 Controller ViewModels）
+# Output: ft.Control — 可直接插入 ListView
+# 禁止: 任何业务逻辑、网络调用、core/adapters/storage 导入
+
+from __future__ import annotations
+import flet as ft
+from app.ui.theme import Colors, Fonts, Spacing, Radius, Borders
+
+
+# ──────────────────────────────────────────────
+# 顶部"角色标签"徽章
+# ──────────────────────────────────────────────
+def _role_badge(role: str) -> ft.Control:
+    label_map = {
+        "user":      ("YOU",      Colors.ROLE_USER),
+        "assistant": ("DEEP",     Colors.ROLE_ASSISTANT),
+        "thinking":  ("THINKING", Colors.ROLE_THINKING),
+    }
+    text, color = label_map.get(role, ("???", Colors.TEXT_SECONDARY))
+    return ft.Container(
+        content=ft.Text(
+            text,
+            size=Fonts.SIZE_XS,
+            font_family=Fonts.MONO,
+            color=color,
+            weight=ft.FontWeight.BOLD,
+        ),
+        padding=ft.Padding(left=6, right=6, top=2, bottom=2),
+        border=ft.Border(
+            top=ft.BorderSide(1, color),
+            bottom=ft.BorderSide(1, color),
+            left=ft.BorderSide(1, color),
+            right=ft.BorderSide(1, color),
+        ),
+        border_radius=Radius.SM,
+    )
+
+
+# ──────────────────────────────────────────────
+# 思考块（可折叠）
+# ──────────────────────────────────────────────
+class ThinkingBlock(ft.Column):
+    """
+    可折叠的思考过程块。
+    通过 append_text(delta) 追加流式内容。
+    """
+
+    def __init__(self) -> None:
+        self._text_ref = ft.Ref[ft.Text]()
+        self._content_ref = ft.Ref[ft.Container]()
+        self._toggle_icon_ref = ft.Ref[ft.Icon]()
+        self._expanded = True
+        self._buffer = ""
+
+        super().__init__(
+            spacing=0,
+            controls=[
+                # 折叠头
+                ft.Container(
+                    content=ft.Row(
+                        controls=[
+                            _role_badge("thinking"),
+                            ft.Container(expand=True),
+                            ft.Icon(ft.Icons.EXPAND_LESS,
+                                ref=self._toggle_icon_ref,
+                                size=16,
+                                color=Colors.TEXT_SECONDARY,
+                            ),
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=ft.Padding(left=Spacing.MD, right=Spacing.MD,
+                                       top=Spacing.SM, bottom=Spacing.SM),
+                    border=Borders.BOTTOM_ONLY,
+                    on_click=self._on_toggle,
+                ),
+                # 内容区（可折叠）
+                ft.Container(
+                    ref=self._content_ref,
+                    content=ft.Text(
+                        ref=self._text_ref,
+                        value="",
+                        size=Fonts.SIZE_SM,
+                        font_family=Fonts.MONO,
+                        color=Colors.TEXT_SECONDARY,
+                    ),
+                    padding=ft.Padding(left=Spacing.MD, right=Spacing.MD,
+                                       top=Spacing.SM, bottom=Spacing.SM),
+                    visible=True,
+                ),
+            ],
+            # 左侧思考色竖线
+            # 使用外层 Container 包裹实现，见 ChatMessage
+        )
+
+    def append_text(self, delta: str) -> None:
+        """流式追加思考内容（由外部在事件循环中调用后需 update）"""
+        self._buffer += delta
+        if self._text_ref.current:
+            self._text_ref.current.value = self._buffer
+
+    def _on_toggle(self, e) -> None:
+        self._expanded = not self._expanded
+        if self._content_ref.current:
+            self._content_ref.current.visible = self._expanded
+        if self._toggle_icon_ref.current:
+            self._toggle_icon_ref.current.name = (
+                ft.Icons.EXPAND_LESS if self._expanded else ft.Icons.EXPAND_MORE
+            )
+        e.control.page.update()
+
+
+# ──────────────────────────────────────────────
+# 主消息气泡
+# ──────────────────────────────────────────────
+class ChatMessage(ft.Container):
+    """
+    单条消息气泡，支持三种角色：user / assistant / thinking。
+
+    流式使用方式：
+        msg = ChatMessage(role="assistant", content="")
+        # 每次收到 delta：
+        msg.append_stream(delta)
+        page.update()
+        # 完成时：
+        msg.finalize_stream()
+        page.update()
+    """
+
+    def __init__(
+        self,
+        role: str,
+        content: str,
+        message_id: str = "",
+        is_thinking: bool = False,
+        on_copy=None,
+        on_regenerate=None,
+    ) -> None:
+        self.role = role
+        self.message_id = message_id
+        self._is_streaming = False
+        self._stream_buffer = content
+
+        self._md_ref = ft.Ref[ft.Markdown]()
+        self._action_row_ref = ft.Ref[ft.Row]()
+
+        # 颜色 & 对齐
+        is_user = (role == "user")
+        bg_color = Colors.BG_ELEVATED if is_user else Colors.BG_SURFACE
+        border = (
+            ft.Border(
+                top=ft.BorderSide(1, Colors.BORDER),
+                bottom=ft.BorderSide(1, Colors.BORDER),
+                left=ft.BorderSide(1, Colors.ROLE_USER + "55"),
+                right=ft.BorderSide(1, Colors.BORDER),
+            )
+            if is_user else
+            ft.Border(
+                top=ft.BorderSide(1, Colors.BORDER),
+                bottom=ft.BorderSide(1, Colors.BORDER),
+                left=ft.BorderSide(2, Colors.ROLE_ASSISTANT),
+                right=ft.BorderSide(1, Colors.BORDER),
+            )
+        )
+        radius = Radius.BUBBLE_USER if is_user else Radius.BUBBLE_ASST
+
+        # 操作按钮行（仅助手消息显示）
+        action_controls: list[ft.Control] = []
+        if not is_user:
+            action_controls = [
+                ft.IconButton(
+                    icon=ft.Icons.CONTENT_COPY_OUTLINED,
+                    icon_size=14,
+                    icon_color=Colors.TEXT_SECONDARY,
+                    tooltip="复制",
+                    on_click=on_copy,
+                    style=ft.ButtonStyle(
+                        padding=ft.Padding(left=4, right=4, top=4, bottom=4),
+                    ),
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.REFRESH_OUTLINED,
+                    icon_size=14,
+                    icon_color=Colors.TEXT_SECONDARY,
+                    tooltip="重新生成",
+                    on_click=on_regenerate,
+                    style=ft.ButtonStyle(
+                        padding=ft.Padding(left=4, right=4, top=4, bottom=4),
+                    ),
+                ),
+            ]
+
+        inner = ft.Column(
+            spacing=Spacing.SM,
+            controls=[
+                # 角色标签行
+                ft.Row(
+                    controls=[
+                        _role_badge(role),
+                        ft.Container(expand=True),
+                    ],
+                ),
+                # Markdown 内容
+                ft.Markdown(
+                    ref=self._md_ref,
+                    value=content,
+                    extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                    code_theme="atom-one-dark",
+                    code_style=ft.TextStyle(
+                        font_family=Fonts.MONO,
+                        size=Fonts.SIZE_SM,
+                    ),
+                    on_tap_link=lambda e: None,  # 链接点击（可扩展）
+                ),
+                # 操作按钮行
+                ft.Row(
+                    ref=self._action_row_ref,
+                    controls=action_controls,
+                    visible=bool(action_controls),
+                    spacing=Spacing.XS,
+                ),
+            ],
+        )
+
+        super().__init__(
+            content=inner,
+            padding=ft.Padding(
+                left=Spacing.LG,
+                right=Spacing.LG,
+                top=Spacing.MD,
+                bottom=Spacing.MD,
+            ),
+            border=border,
+            border_radius=radius,
+            bgcolor=bg_color,
+            margin=ft.Margin(
+                left=0, right=0,
+                top=Spacing.XS, bottom=Spacing.XS,
+            ),
+        )
+
+    # ── 流式接口 ──────────────────────────────
+
+    def start_stream(self) -> None:
+        """标记进入流式状态（可选，用于显示光标等扩展）"""
+        self._is_streaming = True
+        self._stream_buffer = ""
+
+    def append_stream(self, delta: str) -> None:
+        """追加一段流式文本，调用后需 page.update()"""
+        self._stream_buffer += delta
+        if self._md_ref.current:
+            self._md_ref.current.value = self._stream_buffer
+
+    def finalize_stream(self) -> None:
+        """流式结束，清除流式状态"""
+        self._is_streaming = False
+
+    @property
+    def current_content(self) -> str:
+        return self._stream_buffer
